@@ -1,0 +1,232 @@
+---
+title: "welch_t_test_maternal_smoking"
+author: "Rebecca Barton"
+date: "25/04/2023"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE,fig.width = 10, fig.height = 5)
+knitr::opts_chunk$set(tidy.opts=list(width.cutoff=60), tidy=TRUE)
+knitr::opts_chunk$set(warning=FALSE, message=FALSE)
+library(tidyverse)
+```
+
+
+```{r}
+"""Extract dataset from Statlabs data repository online"""
+
+babies<- read.table("https://www.stat.berkeley.edu/users/statlabs/data/babies.data", header=TRUE)
+
+baby_weight<-babies%>%
+  select(weight=bwt,smoke)%>%
+  # remove rows where smoking status is unknown (smoke=9)
+  filter(smoke!=9,weight!=999)%>%mutate(smoke=as.logical(smoke)) 
+
+# display top five rows of new dataframe
+baby_weight%>%head(5)
+
+"""Model checking with density and quantile plot - is the data approximately Gaussian?"""
+
+ggplot(baby_weight,aes(x=weight,colour=smoke))+geom_density()+xlab("Birth weight (oz)")+ylab("Density")+labs(title="Figure 1",color="Mother smokes?")+theme_bw()
+ggplot(baby_weight,aes(sample=weight,colour=smoke))+stat_qq()+facet_wrap(~smoke,scales="free")+stat_qq_line(color="black")+xlab("Theoretical")+ylab("Sample")+labs(title="Figure 2",color="Mother smokes?")+theme_bw()
+
+"""Simulation study"""
+
+set.seed(0) # set random seed for reproducibility
+num_trials<-10000
+sample_size<-100
+
+# data that conforms to the null hypothesis has equal means
+mu_0<-1
+mu_1<-1
+sigma_0<-3
+sigma_1<-3
+
+# my chosen significance level
+alpha<-0.01
+
+normal_simulation<-data.frame(trial=seq(num_trials))%>%
+  # generate random Gaussian samples
+  mutate(sample_0=map(.x=trial,.f=~rnorm(n=sample_size,mean=mu_0,sd=sigma_0)),
+         sample_1=map(.x=trial,.f=~rnorm(n=sample_size,mean=mu_1,sd=sigma_1)))%>%
+  # compute p values
+  mutate(p_value=pmap(.l=list(trial,sample_0,sample_1),
+                      .f=~t.test(..2,..3,var.equal=FALSE)$p.value))%>%
+  # check for type 1 errors
+  mutate(type_1_error=p_value<alpha)
+
+# compute test size (probability of a type I error)
+normal_simulation%>%
+  pull(type_1_error)%>%
+  mean()
+
+"""Custom function to compute the test statistic"""
+
+t_test<- function(data,continuous_var,categorical_var){
+  
+  # extract categorical variable
+  unique_vals<-data%>%pull(categorical_var)%>%unique()
+  unique_vals <- as.character(unique_vals)
+  
+  # sort data by categorical variable
+  group_0<-data%>%filter(!!sym(categorical_var)==unique_vals[1])%>%pull(continuous_var)
+  group_1<-data%>%filter(!!sym(categorical_var)==unique_vals[2])%>%pull(continuous_var)
+  
+  # compute the size of each group
+  n_0<-data%>%filter(!!sym(categorical_var)==unique_vals[1])%>%nrow()
+  n_1<-data%>%filter(!!sym(categorical_var)==unique_vals[2])%>%nrow()
+  
+  # compute mean of each group
+  mean_0<-mean(group_0)
+  mean_1<-mean(group_1)
+  
+  # compute the variance of each group
+  var_0<-var(group_0)
+  var_1<-var(group_1)
+  
+  # compute the test statistic
+  t_statistic<-(mean_0-mean_1)/sqrt(var_0/n_0+var_1/n_1)
+  
+  # compute degrees of freedom
+  
+  dof<-(var_0/n_0+var_1/n_1)**2/(
+    (var_0/n_0)**2/(n_0-1)+
+      (var_1/n_1)**2/(n_1-1))
+  
+  # compute the p-value using the pt function
+  # which returns cumulative density of the t-distribution
+  p_value<-2*(1-pt(abs(t_statistic),df=dof))
+
+  # return dataframe with results
+  return(data.frame(test_statistic=t_statistic,p_value=p_value,dof=dof))
+}
+
+t_test(data=baby_weight,continuous_var="weight",categorical_var="smoke")
+
+# compare results with in-built function 
+t.test(weight~smoke, data=baby_weight,var.equal=FALSE)
+
+# alternatively use $p.value to extract p-value
+t.test(weight~smoke, data=baby_weight,var.equal=FALSE)$p.value
+
+"""Check results for subset of the data"""
+
+set.seed(0) # set seed for reproducibility
+
+# draw only 100 rows from each group
+baby_weight_small<-baby_weight%>%group_by(smoke)%>%sample_n(100)
+
+# compare our function with the in-built function
+my_function<-t_test(data=baby_weight_small,continuous_var="weight",categorical_var="smoke")
+inbuilt_function<-data.frame(t.test(weight~smoke,data=baby_weight_small,var.equal=FALSE)[1:3])%>%
+  rename(test_statistic=statistic,p_value=p.value,dof=parameter)
+
+compare_results<-data.frame(my_function)%>%rbind(inbuilt_function)
+rownames(compare_results)<-c("my function","inbuilt function")
+compare_results
+
+"""P-value as a function of sample size"""
+
+set.seed(0) # set random seed for reproducibility
+num_trials<-100
+max<-480 # the smoker group has maximum 484 observations
+min<-10
+inc<-5
+
+# sorting the dataset into two separate samples
+non_smoker<-baby_weight%>%filter(smoke==0)%>%pull(weight)
+smoker<-baby_weight%>%filter(smoke==1)%>%pull(weight)
+
+baby_weight_simulation<-crossing(trial=seq(num_trials),
+                      sample_size=seq(min,max,inc))%>%
+  # generate random samples
+  mutate(sample_0=map2(.x=trial,.y=sample_size,.f=~sample(non_smoker,size=.y,replace=TRUE)),
+         sample_1=map2(.x=trial,.y=sample_size,.f=~sample(smoker,size=.y,replace=TRUE)))%>%
+  # compute p values
+  mutate(p_value=pmap_dbl(.l=list(trial,sample_0,sample_1),
+                      .f=~t.test(..2,..3,var.equal=FALSE)$p.value))%>%
+  # compute average of p-value for each sample size
+  group_by(sample_size)%>%
+  summarize(average=mean(p_value))
+
+# plot results with y intercept showing significance level alpha
+baby_weight_simulation%>%
+  ggplot(aes(x=sample_size,y=average))+geom_smooth(se = FALSE)+theme_bw()+labs(title = "Figure 6",x="Sample size", y="p-value")+geom_hline(yintercept=0.01,colour="red",linetype="dashed")+geom_text(aes(x=25, label="significance level", y=0.02))
+
+# log transformed plot
+baby_weight_simulation%>%
+  ggplot(aes(x=sample_size,y=average))+geom_smooth(se= FALSE)+theme_bw()+scale_x_continuous(trans="log10")+labs(title="Figure 7",x="Sample size",y="p-value")+geom_hline(yintercept=0.01,colour="red",linetype="dashed")+geom_text(aes(x=15, label="significance level", y=0.012))+coord_cartesian(ylim=c(0,0.05))
+
+"""Power and effect size as a function of sample size"""
+
+set.seed(0) # set random seed for reproducibility
+
+baby_weight_simulation_power<-crossing(trial=seq(num_trials),
+                      sample_size=seq(min,max,inc))%>%
+  # generate random samples
+  mutate(sample_0=map2(.x=trial,.y=sample_size,.f=~sample(non_smoker,size=.y,replace=TRUE)),
+         sample_1=map2(.x=trial,.y=sample_size,.f=~sample(smoker,size=.y,replace=TRUE)))%>%
+  # compute p values
+  mutate(p_value=pmap_dbl(.l=list(trial,sample_0,sample_1),
+                      .f=~t.test(..2,..3,var.equal=FALSE)$p.value))%>%
+  # compute power
+  mutate(reject_null=p_value<alpha)%>%
+  group_by(sample_size)%>%
+  summarize(power=mean(reject_null))
+  
+baby_weight_simulation_power%>%
+  ggplot(aes(x=sample_size,y=power))+geom_smooth(se = FALSE)+theme_bw()+labs(title="Figure 8",x=("Sample size"),y="Power")+scale_x_continuous(trans="log10")
+
+"""Computing Cohen's d for effect size
+
+Below 0.2 - small effect
+Around 0.5 – medium effect
+Larger than 0.8 – A large effect
+
+"""
+
+effect_size<- function(data,continuous_var,categorical_var){
+  
+  # extract categorical variable
+  unique_vals<-data%>%pull(categorical_var)%>%unique()
+  unique_vals <- as.character(unique_vals)
+  
+  # sort data by categorical variable
+  group_0<-data%>%filter(!!sym(categorical_var)==unique_vals[1])%>%pull(continuous_var)
+  group_1<-data%>%filter(!!sym(categorical_var)==unique_vals[2])%>%pull(continuous_var)
+  
+  # compute the size of each group
+  n_0<-data%>%filter(!!sym(categorical_var)==unique_vals[1])%>%nrow()
+  n_1<-data%>%filter(!!sym(categorical_var)==unique_vals[2])%>%nrow()
+  
+  # compute mean of each group
+  mean_0<-mean(group_0)
+  mean_1<-mean(group_1)
+  
+  # compute the variance of each group
+  var_0<-var(group_0)
+  var_1<-var(group_1)
+  
+  # compute the combined standard deviation
+  sd_combined<-sqrt(((n_0-1)*var_0+(n_1-1)*var_1)/(n_0+n_1-2))
+
+  # compute effect size
+  effect_size<-(mean_0-mean_1)/sd_combined
+
+  return(effect_size)
+}
+
+effect_size(data=baby_weight,continuous_var="weight",categorical_var="smoke")
+
+"""Summarising results"""
+
+results<-t_test(data=baby_weight,continuous_var="weight",categorical_var="smoke")%>%
+  mutate(significance_level=alpha)%>%
+  mutate(effect_size=effect_size(data=baby_weight,continuous_var="weight",categorical_var="smoke"))
+results
+
+"""Using one-sided t-test"""
+
+t.test(weight~smoke, data=baby_weight,var.equal=FALSE,alternative="greater")
+```
